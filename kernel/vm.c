@@ -145,6 +145,7 @@ kvmpa(uint64 va)
 // physical addresses starting at pa. va and size might not
 // be page-aligned. Returns 0 on success, -1 if walk() couldn't
 // allocate a needed page-table page.
+// 自va起长size的一块虚拟内存建立映射到物理内存pa地址处，perm为权限控制
 int
 mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 {
@@ -440,3 +441,30 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+void
+vmprint(pagetable_t pagetable) {
+	printf("page table %p\n", pagetable);
+	for(int i2 = 0; i2 < 512; i2++) {
+		pte_t pte2 = pagetable[i2];
+		if(pte2 & PTE_V) {
+			pagetable_t pagetable2 = (pagetable_t) PTE2PA(pte2);
+			printf("..%d: pte %p pa %p\n", i2, pte2, pagetable2);
+			for(int i1 = 0; i1 < 512; i1++) {
+				pte_t pte1 = pagetable2[i1];
+				if(pte1 & PTE_V) {
+					pagetable_t pagetable1 = (pagetable_t) PTE2PA(pte1);
+					printf(".. ..%d: pte %p pa %p\n", i1, pte1, pagetable1);
+					for(int i0 = 0; i0 < 512; i0++) {
+						pte_t pte0 = pagetable1[i0];
+						if(pte0 & PTE_V) {
+							pagetable_t pagetable0 = (pagetable_t) PTE2PA(pte0);
+							printf(".. .. ..%d: pte %p pa %p\n", i0, pte0, pagetable0);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+

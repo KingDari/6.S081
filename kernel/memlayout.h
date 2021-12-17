@@ -45,6 +45,8 @@
 // for use by the kernel and user pages
 // from physical address 0x80000000 to PHYSTOP.
 #define KERNBASE 0x80000000L
+// PHYSTOP: 0x8000_0000 + 128*1024*1024 = 0x8800_0000? 书上写的是at least*至少0x8640_0000
+// MAXVA: see riscv.h 1<<(9+9+9+12-1) = 1<<38 = 2^37 = 0x0000_0020_0000_0000
 #define PHYSTOP (KERNBASE + 128*1024*1024)
 
 // map the trampoline page to the highest address,
