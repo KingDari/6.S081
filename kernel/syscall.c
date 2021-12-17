@@ -12,6 +12,7 @@ int
 fetchaddr(uint64 addr, uint64 *ip)
 {
   struct proc *p = myproc();
+  // p->sz:进程内存大小
   if(addr >= p->sz || addr+sizeof(uint64) > p->sz)
     return -1;
   if(copyin(p->pagetable, (char *)ip, addr, sizeof(*ip)) != 0)
