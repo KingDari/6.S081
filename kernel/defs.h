@@ -179,6 +179,7 @@ int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 void			vmprint(pagetable_t);
+void			vmprint2(pagetable_t);
 void			uvmmap(pagetable_t, uint64, uint64, uint64, int);
 pagetable_t		getKernelPagetable();
 

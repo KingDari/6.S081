@@ -498,6 +498,33 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 }
 
 void
+vmprint_helper(pagetable_t pagetable, int level) {
+	if(level < 0) {
+		panic("vmprint: negative level");
+	}
+	for(int i = 0; i < 512; i++) {
+		pte_t pte = pagetable[i];
+		if((pte & PTE_V)) {
+			// V有效
+			pagetable_t child = (pagetable_t) PTE2PA(pte);
+			for(int j = 2; j > level; j--) {
+				printf(".. ");
+			}
+			printf("..%d: pte %p pa %p\n", i, pte, child);
+			if((pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+				vmprint_helper(child, level - 1);
+			}
+		}
+	}
+}
+
+void
+vmprint2(pagetable_t pagetable) {
+	printf("page table %p\n", pagetable);
+	vmprint_helper(pagetable, 2);
+}
+
+void
 vmprint(pagetable_t pagetable) {
 	printf("page table %p\n", pagetable);
 	for(int i2 = 0; i2 < 512; i2++) {
