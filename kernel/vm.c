@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -15,6 +17,7 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+//void uvmmap(pagetable_t, uint64, uint64, uint64, int);
 /*
  * create a direct-map page table for the kernel.
  */
@@ -47,8 +50,44 @@ kvminit()
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
+// 获得一个进程私有的内核页表地址，开始是与全局内核页表存储映射一致
+// 是一个修改版本的kvminit()
+pagetable_t 
+getKernelPagetable(){
+  pagetable_t kernel_pagetable = uvmcreate();		
+
+  if(kernel_pagetable == 0) {
+	  return 0;
+  }
+  // uart registers
+  uvmmap(kernel_pagetable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  uvmmap(kernel_pagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // CLINT
+  uvmmap(kernel_pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  // PLIC
+  uvmmap(kernel_pagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  uvmmap(kernel_pagetable, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  uvmmap(kernel_pagetable, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  uvmmap(kernel_pagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return kernel_pagetable;
+}
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
+// 将内核页表的起始物理地址设置到satp寄存器中
+// 都是汇编指令，sfence_vma()还有将TLB（三级转换缓冲区）清空的效果
+// 这是为了防止更换satp后，新的进程通过缓冲区访问到老的satp所缓存的地址
 void
 kvminithart()
 {
@@ -59,6 +98,10 @@ kvminithart()
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page-table pages.
+// 通过pagetable和va返回PTE的地址，该地址是物理内存地址。
+// 若alloc!=0，那么会通过kalloc()分配一个物理页
+// 这个物理页是目录页！地址是kalloc()分配的，空闲列表里拿。
+// 仅完成3级目录=>1级目录的转换，最终返回值仍然是1级目录的地址
 //
 // The risc-v Sv39 scheme has three levels of page-table
 // pages. A page-table page contains 512 64-bit PTEs.
@@ -79,6 +122,8 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
     if(*pte & PTE_V) {
       pagetable = (pagetable_t)PTE2PA(*pte);
     } else {
+	  // pde_t: page directionary entry address
+	  // pte_t: page table entry address
       if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
         return 0;
       memset(pagetable, 0, PGSIZE);
@@ -121,10 +166,18 @@ kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
     panic("kvmmap");
 }
 
+// uvmmap like kvmmap but can transfer pagetable_t
+void
+uvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm) {
+	if(mappages(pagetable, va, sz, pa, perm) != 0) {
+		panic("uvmmap");
+	}
+}
 // translate a kernel virtual address to
 // a physical address. only needed for
 // addresses on the stack.
 // assumes va is page aligned.
+// 修改为从进程私有的内核页表寻址
 uint64
 kvmpa(uint64 va)
 {
@@ -132,7 +185,7 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->kernel_pagetable, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -159,6 +212,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
       return -1;
     if(*pte & PTE_V)
       panic("remap");
+	// pte:是物理内存指针，指向由虚拟内存经过3级查询得到的PPN+FLAGS的PTE的地址
+	// *pte:直接修改，将3级查询得到的物理地址修改为指定地址。无视walk分配的地址
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
       break;

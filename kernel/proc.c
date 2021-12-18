@@ -20,6 +20,7 @@ static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
+extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 // initialize the proc table at boot time.
 void
@@ -30,18 +31,20 @@ procinit(void)
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
-
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+// 将内核栈的分配移动到了procalloc()中
+//      // Allocate a page for the process's kernel stack.
+//      // Map it high in memory, followed by an invalid
+//      // guard page.
+//      char *pa = kalloc();
+//      if(pa == 0)
+//        panic("kalloc");
+//	  // KSTACK: 获取Trampoline地址下面的kstack地址，并保证两个之间隔着一个保护页
+//      uint64 va = KSTACK((int) (p - proc));
+//	  // 将从kalloc()处获得的物理内存地址与kstack地址绑定映射
+//      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+//      p->kstack = va;
   }
-  kvminithart();
+//  kvminithart();
 }
 
 // Must be called with interrupts disabled,
@@ -121,6 +124,29 @@ found:
     return 0;
   }
 
+  // Allocate process-private kernel pagetable
+  p->kernel_pagetable = getKernelPagetable();
+  if(p->kernel_pagetable == 0) {
+	  freeproc(p);
+	  release(&p->lock);
+	  return 0;
+  } 
+
+  // Allocate a page for the process's kernel stack.
+  // Map it high in memory, followed by an invalid
+  // guard page.
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("kalloc");
+  // KSTACK: 获取Trampoline地址下面的kstack地址
+  // 并保证两个之间隔着一个保护页
+  uint64 va = KSTACK(0);
+  // 将从kalloc()处获得的物理内存地址与kstack地址绑定映射
+  // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  // 全局和私有都要设置吗？
+  uvmmap(p->kernel_pagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+ 
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -139,9 +165,14 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if(p->kernel_pagetable) {
+	procFreeKernelPagetable(p);
+  }
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+
+  p->kernel_pagetable = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -152,6 +183,23 @@ freeproc(struct proc *p)
   p->state = UNUSED;
 }
 
+// 释放进程私有内核页表拷贝，仅释放目录部分
+// 叶子是物理内存，依附于全局内核页表
+void
+procFreeKernelPagetable(struct proc *p) {
+  // 先将目录最后对物理内存的映射释放 (*pte=0)
+  uvmunmap(p->kernel_pagetable, UART0, PGSIZE/PGSIZE, 0);
+  uvmunmap(p->kernel_pagetable, VIRTIO0, PGSIZE/PGSIZE, 0);
+  uvmunmap(p->kernel_pagetable, CLINT, 0x10000/PGSIZE, 0);
+  uvmunmap(p->kernel_pagetable, PLIC, 0x400000/PGSIZE, 0);
+  uvmunmap(p->kernel_pagetable, KERNBASE, ((uint64)etext-KERNBASE)/PGSIZE, 0);
+  uvmunmap(p->kernel_pagetable, (uint64)etext, (PHYSTOP-(uint64)etext)/PGSIZE, 0);
+  uvmunmap(p->kernel_pagetable, TRAMPOLINE, PGSIZE/PGSIZE, 0);
+  // 内核栈要单独释放，包括物理内存
+  uvmunmap(p->kernel_pagetable, p->kstack, PGSIZE/PGSIZE, 1);
+  // 再将三级目录释放
+  uvmfree(p->kernel_pagetable, 0);
+}
 // Create a user page table for a given process,
 // with no user memory, but with trampoline pages.
 pagetable_t
@@ -473,7 +521,14 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+		w_satp(MAKE_SATP(p->kernel_pagetable));
+		sfence_vma();
+	
+		// swtch: # Save current registers in old. Load from new.	
         swtch(&c->context, &p->context);
+
+		kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
