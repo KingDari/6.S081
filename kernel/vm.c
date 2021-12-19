@@ -66,7 +66,7 @@ getKernelPagetable(){
   uvmmap(kernel_pagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
   // CLINT
-  uvmmap(kernel_pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  // uvmmap(kernel_pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
 
   // PLIC
   uvmmap(kernel_pagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
@@ -88,6 +88,13 @@ getKernelPagetable(){
 // 将内核页表的起始物理地址设置到satp寄存器中
 // 都是汇编指令，sfence_vma()还有将TLB（三级转换缓冲区）清空的效果
 // 这是为了防止更换satp后，新的进程通过缓冲区访问到老的satp所缓存的地址
+
+// 一切的地址都在此刻改变了
+// 调用前，所有地址访问均为直接访问，不会经过satp寄存器转换
+// 即物理地址
+// 调用后，所有地址访问均要硬件通过satp三级转换寻址。
+// 即虚拟地址
+// 不过在调用前就已经将内核页表设置为直接对应关系了。
 void
 kvminithart()
 {
@@ -361,6 +368,12 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
+// 复制旧页表从0开始，sz长度的页到新的页表处
+// 包括三级目录和物理内存
+// 物理内存在通过walk获取到旧页表的物理地址后kalloc创建
+// 新的物理内存页来复制一份
+// 随后通过mappages将新的物理内存页与新页表关联
+// 在此过程中三级目录被创建/修改 (walk参数为1)
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
@@ -404,6 +417,29 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
+// 同步私有内核页表映射的物理地址与虚拟页表映射的物理地址
+// 起始虚拟地址，长度。可以不对齐
+void 
+pkvmmap(pagetable_t pagetable, pagetable_t kernel_pagetable, uint64 va_start, uint64 len) {
+//	ORI		UP		DOWN
+//	0		0		0		
+//	1		4096	0
+//	4095	4096	0
+//	4096	4096	4096
+//	4097	8192	4096
+  uint64 va0 = PGROUNDDOWN(va_start);
+  uint64 va1 = PGROUNDUP(va_start+len);
+  // [va0, va1)
+  for(uint64 i = va0; i < va1; i += PGSIZE) {
+	  pte_t *pte = walk(pagetable, i, 0);
+	  pte_t *k_pte = walk(kernel_pagetable, i, 1);
+	  if(pte == 0 || k_pte == 0) {
+		  panic("pkvmmap");
+	  }
+	  *k_pte = (*pte) & (~PTE_U);
+  }
+}
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
@@ -435,8 +471,12 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
+  // lab3-3
+  return copyin_new(pagetable, dst, srcva, len);
+
   uint64 n, va0, pa0;
 
+  // 物理上不连续，分页copy
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
@@ -461,6 +501,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
+  return copyinstr_new(pagetable, dst, srcva, max);
   uint64 n, va0, pa0;
   int got_null = 0;
 

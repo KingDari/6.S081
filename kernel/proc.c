@@ -156,6 +156,8 @@ found:
   return p;
 }
 
+void
+proc_freekpt(pagetable_t kpt); 
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
@@ -165,14 +167,22 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
-  if(p->kernel_pagetable) {
-	procFreeKernelPagetable(p);
+
+  if(p->kstack) {
+	uvmunmap(p->kernel_pagetable, p->kstack, 1, 1);
   }
+  p->kstack = 0;
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
 
+  if(p->kernel_pagetable) {
+//	procFreeKernelPagetable(p);
+	proc_freekpt(p->kernel_pagetable);
+  }
   p->kernel_pagetable = 0;
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -183,6 +193,24 @@ freeproc(struct proc *p)
   p->state = UNUSED;
 }
 
+// 将私有内核页所有目录页全部释放，不释放物理内存
+void
+proc_freekpt(pagetable_t kpt) {
+	for(int i = 0; i < 512; i++) {
+		pte_t pte = kpt[i];
+		if(pte & PTE_V) {
+			// 有效页
+			kpt[i] = 0;
+			if((pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+				// RWX全部无效，但为有效页: dictionary
+				uint64 child = PTE2PA(pte);
+				proc_freekpt((pagetable_t) child);
+			}
+		}
+	}
+	kfree((void*)kpt);
+}
+
 // 释放进程私有内核页表拷贝，仅释放目录部分
 // 叶子是物理内存，依附于全局内核页表
 void
@@ -190,13 +218,16 @@ procFreeKernelPagetable(struct proc *p) {
   // 先将目录最后对物理内存的映射释放 (*pte=0)
   uvmunmap(p->kernel_pagetable, UART0, PGSIZE/PGSIZE, 0);
   uvmunmap(p->kernel_pagetable, VIRTIO0, PGSIZE/PGSIZE, 0);
-  uvmunmap(p->kernel_pagetable, CLINT, 0x10000/PGSIZE, 0);
+  // uvmunmap(p->kernel_pagetable, CLINT, 0x10000/PGSIZE, 0);
   uvmunmap(p->kernel_pagetable, PLIC, 0x400000/PGSIZE, 0);
   uvmunmap(p->kernel_pagetable, KERNBASE, ((uint64)etext-KERNBASE)/PGSIZE, 0);
   uvmunmap(p->kernel_pagetable, (uint64)etext, (PHYSTOP-(uint64)etext)/PGSIZE, 0);
   uvmunmap(p->kernel_pagetable, TRAMPOLINE, PGSIZE/PGSIZE, 0);
+  // 释放用户页表的虚拟内存映射
+  uvmunmap(p->kernel_pagetable, 0, PGROUNDUP(p->sz)/PGSIZE, 0);
   // 内核栈要单独释放，包括物理内存
   uvmunmap(p->kernel_pagetable, p->kstack, PGSIZE/PGSIZE, 1);
+  //vmprint2(p->kernel_pagetable);
   // 再将三级目录释放
   uvmfree(p->kernel_pagetable, 0);
 }
@@ -268,6 +299,17 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  
+  // 私有内核页表赋值，要把权限改为内核可以访问
+  // 由kernel_pagetable作为satp寄存器的值时
+  // 使用虚拟地址如起始页0去通过硬件转换
+  // 得到的PTE需要指向uvminit()中通过kalloc()分配的物理页
+  // 为此，需要在软件中进行walk模拟硬件转换
+  // 将硬件转换得到的PTE的值改为uvminit()中获得的物理地址
+
+  // 在软件中使用的所有地址，一切都在kvminithart()时改变了！！
+  // 详见vm.c kvminithart()
+  pkvmmap(p->pagetable, p->kernel_pagetable, 0, PGSIZE);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -294,8 +336,14 @@ growproc(int n)
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+	// 可能会多映射了一个，但问题不大
+	pkvmmap(p->pagetable, p->kernel_pagetable, p->sz, sz - p->sz);
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+	if(PGROUNDUP(sz) < PGROUNDUP(p->sz)) {
+	  int npages = (PGROUNDUP(p->sz) - PGROUNDUP(sz)) / PGSIZE;
+	  uvmunmap(p->kernel_pagetable, PGROUNDUP(sz), npages, 0);
+	}
   }
   p->sz = sz;
   return 0;
@@ -314,14 +362,23 @@ fork(void)
   if((np = allocproc()) == 0){
     return -1;
   }
-
   // Copy user memory from parent to child.
+
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
   }
+
   np->sz = p->sz;
+
+  // 通过allocproc()获取到的新进程的私有内核页表
+  // 已经完成了内核页表部分中全局内核页表内存到物理内存的直接映射
+  // 需要将虚拟内存到物理内存的直接映射再设置一遍
+  // 不能uvmcopy将p->kpgt复制到np->kpgt中，因为私有内核页表保存的
+  // 是拷贝，物理内存页已经通过用户页表复制过了。
+  // 只需要全部虚拟寻址得到PTE后把地址复制过去就好。
+  pkvmmap(np->pagetable, np->kernel_pagetable, 0, np->sz);;
 
   np->parent = p;
 

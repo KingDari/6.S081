@@ -56,6 +56,9 @@ exec(char *path, char **argv)
       goto bad;
     if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
       goto bad;
+	if(sz1 >= PLIC) {
+	  goto bad;
+	}
   }
   iunlockput(ip);
   end_op();
@@ -74,6 +77,8 @@ exec(char *path, char **argv)
   uvmclear(pagetable, sz-2*PGSIZE);
   sp = sz;
   stackbase = sp - PGSIZE;
+
+  pkvmmap(pagetable, p->kernel_pagetable, 0, sz);
 
   // Push argument strings, prepare rest of stack in ustack.
   for(argc = 0; argv[argc]; argc++) {
@@ -96,6 +101,8 @@ exec(char *path, char **argv)
     goto bad;
   if(copyout(pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
+ 
+
 
   // arguments to user main(argc, argv)
   // argc is returned via the system call return
