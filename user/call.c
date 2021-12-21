@@ -8,10 +8,10 @@ int g(int x) {
 }
 
 int f(int x) {
-  return g(x);
+	return g(x);
 }
 
 void main(void) {
-  printf("%d %d\n", f(8)+1, 13);
-  exit(0);
+	printf("%d %d\n", f(8)+1, 13);
+	exit(0);
 }

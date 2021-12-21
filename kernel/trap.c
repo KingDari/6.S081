@@ -29,6 +29,46 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+void
+copytrapframe(struct trapframe *tf, struct trapframe *stf) {
+  stf->kernel_satp = tf->kernel_satp;
+  stf->kernel_sp = tf->kernel_sp;
+  stf->kernel_trap = tf->kernel_trap;
+  stf->epc = tf->epc;
+  stf->kernel_hartid = tf->kernel_hartid;
+  stf->ra = tf->ra;
+  stf->sp = tf->sp;
+  stf->gp = tf->gp;
+  stf->tp = tf->tp;
+  stf->t0 = tf->t0;
+  stf->t1 = tf->t1;
+  stf->t2 = tf->t2;
+  stf->s0 = tf->s0;
+  stf->s1 = tf->s1;
+  stf->a0 = tf->a0;
+  stf->a1 = tf->a1;
+  stf->a2 = tf->a2;
+  stf->a3 = tf->a3;
+  stf->a4 = tf->a4;
+  stf->a5 = tf->a5;
+  stf->a6 = tf->a6;
+  stf->a7 = tf->a7;
+  stf->s2 = tf->s2;
+  stf->s3 = tf->s3;
+  stf->s4 = tf->s4;
+  stf->s5 = tf->s5;
+  stf->s6 = tf->s6;
+  stf->s7 = tf->s7;
+  stf->s8 = tf->s8;
+  stf->s9 = tf->s9;
+  stf->s10 = tf->s10;
+  stf->s11 = tf->s11;
+  stf->t3 = tf->t3;
+  stf->t4 = tf->t4;
+  stf->t5 = tf->t5;
+  stf->t6 = tf->t6;
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -76,6 +116,15 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
+  if(which_dev == 2 && p->ticks) {
+    p->tickcount++;
+	if(p->tickcount == p->ticks && p->runhandler == 0) {
+		p->tickcount = 0;
+		p->runhandler = 1;
+		copytrapframe(p->trapframe, p->savedtrapframe);
+		p->trapframe->epc = (uint64) p->handler;
+	}
+  }
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();
