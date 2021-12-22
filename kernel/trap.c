@@ -65,6 +65,26 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15 || r_scause() == 13) {
+    // page fault 
+    uint64 va = PGROUNDDOWN(r_stval());
+	uint64 guardpageva = PGROUNDDOWN(p->trapframe->sp);
+	//printf("va=%p downva=%p sp=%p downsp=%p\n", r_stval(), va, p->trapframe->sp, guardpageva);
+	if(va >= p->sz || va + PGSIZE == guardpageva) {
+		p->killed = 1;
+	} else {
+	  uint64 pa = (uint64) kalloc();
+	  if(pa == 0) {
+		p->killed = 1;
+	  } else {
+		memset((void *) pa, 0, PGSIZE);
+		if(mappages(p->pagetable, va, PGSIZE, pa, PTE_W|PTE_R|PTE_U|PTE_X) != 0) {
+			kfree((void *) pa);
+			p->killed = 1;
+		}
+	  }
+	}
+	
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
