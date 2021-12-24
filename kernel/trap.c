@@ -11,6 +11,8 @@ uint ticks;
 
 extern char trampoline[], uservec[], userret[];
 
+extern uint refcount[];
+
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
 
@@ -65,6 +67,36 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15) {
+    uint64 va = PGROUNDDOWN(r_stval());
+	pte_t *pte = walk(p->pagetable, va, 0);
+	if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_COW) == 0) {
+		printf("PTE_COW1\n");
+		p->killed = 1;
+		goto outer;
+	}
+	uint64 pa = PTE2PA(*pte);
+	if(refcount[(pa-KERNBASE)/PGSIZE] == 2) {
+		*pte |= PTE_W;
+		*pte &= ~PTE_COW;
+	} else {
+		uint flag = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+		void *mem = kalloc();
+		if(mem == 0) {
+			printf("PTE_COW2\n");
+			p->killed = 1;
+			goto outer;
+		}
+		memmove(mem, (void *)pa, PGSIZE);
+		uvmunmap(p->pagetable, va, 1, 1);
+		if(mappages(p->pagetable, va, PGSIZE, (uint64) mem, flag) != 0) {
+			kfree(mem);
+			p->killed = 1;
+			printf("PTE_COW3\n");
+			goto outer;
+		}
+	}
+
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -72,7 +104,7 @@ usertrap(void)
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
-
+outer:
   if(p->killed)
     exit(-1);
 

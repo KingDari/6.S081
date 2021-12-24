@@ -14,6 +14,8 @@ void freerange(void *pa_start, void *pa_end);
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
+uint refcount[(PHYSTOP - KERNBASE) / PGSIZE];
+
 struct run {
   struct run *next;
 };
@@ -80,3 +82,4 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+

@@ -15,6 +15,9 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+extern char end[];
+extern uint refcount[];
+
 /*
  * create a direct-map page table for the kernel.
  */
@@ -159,6 +162,11 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
     if(*pte & PTE_V)
       panic("remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
+	if(pa >= KERNBASE && pa < PHYSTOP) {
+	  if(++refcount[(pa - KERNBASE)/PGSIZE] == 0) {
+		panic("overflow");
+	  }
+	}
     if(a == last)
       break;
     a += PGSIZE;
@@ -186,11 +194,17 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
-    if(do_free){
-      uint64 pa = PTE2PA(*pte);
+    uint64 pa = PTE2PA(*pte);
+	if((char *)pa >= end && pa < PHYSTOP) {
+	  if(refcount[(pa - KERNBASE)/PGSIZE]-- == 1) {
+		panic("underflow");
+	  }
+	}
+	*pte = 0;
+	// 全局内核页表必定持有引用
+    if(do_free && refcount[(pa - KERNBASE)/PGSIZE] == 1){
       kfree((void*)pa);
     }
-    *pte = 0;
   }
 }
 
@@ -311,7 +325,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+//  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -319,19 +333,28 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+	*pte = (*pte & ~PTE_W);
+	*pte = *pte | PTE_COW;
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+//    if((mem = kalloc()) == 0)
+//      goto err;
+//    memmove(mem, (char*)pa, PGSIZE);
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
       goto err;
     }
   }
   return 0;
 
  err:
+  printf("ERR\n");
   uvmunmap(new, 0, i / PGSIZE, 1);
+  for(int j = 0; j < i; j++) {
+    if((pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy: pte should exist");
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy: page not present");
+	*pte = (*pte | PTE_W) & ~PTE_COW;
+  }
   return -1;
 }
 
@@ -355,6 +378,7 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
@@ -364,6 +388,35 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
+
+	pte = walk(pagetable, va0, 0);
+	if((*pte & PTE_W) == 0) {
+		if((*pte & PTE_COW) == 0) {
+			printf("CO!\n");
+			return -1;
+		}
+		uint flag = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+		if(refcount[(pa0-KERNBASE)/PGSIZE] == 2){
+			*pte |= PTE_W;
+			*pte &= ~PTE_COW;
+		} else {
+			void *mem = kalloc();
+			if(mem == 0) {
+				printf("CO2\n");
+				return -1;
+			}
+		    memmove(mem, (void *)pa0, PGSIZE);
+			uvmunmap(pagetable, va0, 1, 1);
+			if(mappages(pagetable, va0, PGSIZE, (uint64) mem, flag) != 0) {
+				kfree(mem);
+				printf("CO3\n");
+				return -1;
+			}
+			pa0 = (uint64) mem;
+	
+		}
+	}
+	
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
