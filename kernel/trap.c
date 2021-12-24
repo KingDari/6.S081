@@ -10,6 +10,7 @@ struct spinlock tickslock;
 uint ticks;
 
 extern char trampoline[], uservec[], userret[];
+extern pagetable_t kernel_pagetable;
 
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
@@ -69,7 +70,13 @@ usertrap(void)
     // page fault 
     uint64 va = PGROUNDDOWN(r_stval());
 	uint64 guardpageva = PGROUNDDOWN(p->trapframe->sp);
-	//printf("va=%p downva=%p sp=%p downsp=%p\n", r_stval(), va, p->trapframe->sp, guardpageva);
+	printf("sz = %d va=%p downva=%p sp=%p downsp=%p\n", p->sz,  r_stval(), va, p->trapframe->sp, guardpageva);
+	pte_t *ptet = walk(kernel_pagetable, p->kstack, 0);
+	uint64 pat = PTE2PA(*ptet);
+	printf("kstack = %p kernel_pagetable = %p walk_kstack = %p\n", p->kstack, kernel_pagetable, pat);
+	pte_t *ptet2 = walk(p->pagetable, guardpageva, 0);
+	uint64 pat2 = PTE2PA(*ptet2);
+	printf("physical address = %p\n", pat2);
 	if(va >= p->sz || va + PGSIZE == guardpageva) {
 		p->killed = 1;
 	} else {
