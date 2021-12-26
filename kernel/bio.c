@@ -60,7 +60,6 @@ binit(void)
   // Create linked list of buffers
   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
     initsleeplock(&b->lock, "buffer");
-	b->bucket = -1;
   }
 }
 
