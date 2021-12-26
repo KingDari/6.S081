@@ -10,6 +10,5 @@ struct buf {
   uchar data[BSIZE];
 
   uint lasttick;
-  uint bucket;
 };
 
