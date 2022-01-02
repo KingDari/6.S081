@@ -5,6 +5,11 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "fcntl.h"
+#include "file.h"
+
 
 struct spinlock tickslock;
 uint ticks;
@@ -65,9 +70,53 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15) {
+    // page fault
+	uint64 va = PGROUNDDOWN(r_stval());
+	if(va >= p->sz) {
+		goto err;
+	}
+	struct vma *fvma = 0;
+	for(int i = 0; i < VMAMAX; i++) {
+		if(va >= p->pvma[i].addr && 
+		   va < p->pvma[i].addr + p->pvma[i].length) {
+			fvma = &p->pvma[i];
+		}
+	}
+	if(!fvma) {
+		goto err;
+	}
+	uint64 pa = (uint64) kalloc();
+	if(pa == 0) {
+		goto err;
+	}
+	memset((void *)pa, 0, PGSIZE);
+	ilock(fvma->f->ip);
+	if(readi(fvma->f->ip, 0, pa, va - fvma->addr, PGSIZE) <= 0) {
+		printf("readi error\n");
+		iunlock(fvma->f->ip);
+		kfree((void *) pa);
+		goto err;
+	}
+	iunlock(fvma->f->ip);
+	int flag = PTE_U;
+	if(fvma->prot & PROT_READ) {
+		flag |= PTE_R;
+	}
+	if(fvma->prot & PROT_WRITE) {
+		flag |= PTE_W;
+	}
+	if(fvma->prot & PROT_EXEC) {
+		flag |= PTE_X;
+	}
+	if(mappages(p->pagetable, va, PGSIZE, pa, flag) != 0) {
+		kfree((void *) pa);
+		goto err;
+	}
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
+err:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;

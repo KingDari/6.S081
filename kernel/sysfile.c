@@ -484,3 +484,104 @@ sys_pipe(void)
   }
   return 0;
 }
+uint64
+sys_mmap(void) {
+	uint64 addr;
+	uint64 length;
+	int prot;
+	int flags;
+	struct file *f;
+	uint64 offset;
+
+	struct proc *p = myproc();
+
+	if(argaddr(0, &addr) < 0 || argaddr(1, &length) < 0 || argint(2, &prot) < 0 
+	|| argint(3, &flags) < 0 || argfd(4, 0, &f) < 0 || argaddr(5, &offset) < 0) {
+		return MAP_FAIL;
+	}
+
+	if(addr || offset) {
+		printf("ARGU ERROR\n");
+		return MAP_FAIL;
+	}
+
+	if((prot & PROT_READ) && (!f->readable)) {
+		printf("READ ERROR\n");
+		return MAP_FAIL;
+	}
+
+	if((prot & PROT_WRITE) && (flags & MAP_SHARED) && (!f->writable)) {
+		printf("WRITE ERROR\n");
+		return MAP_FAIL;
+	}
+
+	uint64 len = PGROUNDUP(length);
+	addr = p->sz;
+	p->sz += len;
+
+	for(int i = 0; i < VMAMAX; i++) {
+		if(p->pvma[i].length) {
+			continue;
+		}
+		p->pvma[i].addr = addr;
+		p->pvma[i].length = length;
+		p->pvma[i].prot = prot;
+		p->pvma[i].flags = flags;
+		p->pvma[i].f = f;
+		p->pvma[i].offset = offset;
+		filedup(f);
+		return addr;
+	}
+
+	return MAP_FAIL;
+}
+
+uint64
+sys_munmap(void) {
+	uint64 addr;
+	uint64 length;
+	struct proc *p = myproc();
+	struct vma *fvma = 0;
+
+	if(argaddr(0, &addr) < 0 || argaddr(1, &length) < 0) {
+		return -1;
+	}
+
+	for(int i = 0; i < VMAMAX; i++) {
+		if(addr >= p->pvma[i].addr && addr < p->pvma[i].addr + p->pvma[i].length) {
+			fvma = &p->pvma[i];
+			break;
+		}
+	}
+
+	if(!fvma) {
+		return -1;
+	}
+	
+	if(addr != fvma->addr && addr + length != fvma->addr + fvma->length) {
+		printf("ARGU ERROR\n");
+		return -1;
+	}
+
+	if((fvma->prot & PROT_WRITE) && (fvma->flags & MAP_SHARED)) {
+		begin_op();
+		ilock(fvma->f->ip);
+		writei(fvma->f->ip, 1, addr, addr - fvma->addr, length);
+		iunlock(fvma->f->ip);
+		end_op();
+	}
+
+	uvmunmap(p->pagetable, addr, PGROUNDUP(length)/PGSIZE, 1);
+	if(addr == fvma->addr && length == fvma->length) {
+		fileclose(fvma->f);
+		fvma->f = 0;
+	}
+
+	if(addr == fvma->addr) {
+		fvma->addr = addr + PGROUNDUP(length);
+		fvma->length = fvma->length - length;
+	} else {
+		fvma->length = fvma->length - length;
+	}
+	return 0;
+}

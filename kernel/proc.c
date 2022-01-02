@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -284,6 +288,19 @@ fork(void)
 
   np->parent = p;
 
+  for(int i = 0; i < VMAMAX; i++) {
+	if(p->pvma[i].length == 0) {
+		continue;
+	}
+	np->pvma[i].addr = p->pvma[i].addr;
+	np->pvma[i].length = p->pvma[i].length;
+	np->pvma[i].prot = p->pvma[i].prot;
+	np->pvma[i].flags = p->pvma[i].flags;
+	np->pvma[i].f = p->pvma[i].f;
+	np->pvma[i].offset = p->pvma[i].offset;
+	filedup(p->pvma[i].f);
+  }
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -343,6 +360,24 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  for(int i = 0; i < VMAMAX; i++) {
+	  if(p->pvma[i].length != 0) {
+		  if((p->pvma[i].prot & PROT_WRITE) && (p->pvma[i].flags & MAP_SHARED)) {
+			  begin_op();
+			  ilock(p->pvma[i].f->ip);
+			  writei(p->pvma[i].f->ip, 1, p->pvma[i].addr, 0, p->pvma[i].length);
+			  iunlock(p->pvma[i].f->ip);
+			  end_op();
+		  }
+
+		  uvmunmap(p->pagetable, p->pvma[i].addr, PGROUNDUP(p->pvma[i].length)/PGSIZE, 1);
+		  fileclose(p->pvma[i].f);
+
+		  p->pvma[i].f = 0;
+		  p->pvma[i].length = 0;
+	  }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
